@@ -1,0 +1,16 @@
+{
+  "name": "stage-cue-sync",
+  "version": "1.0.0",
+  "description": "舞台排练口令同步系统：导演编排口令序列，控制端逐条发出口令，目标岗位实时确认",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

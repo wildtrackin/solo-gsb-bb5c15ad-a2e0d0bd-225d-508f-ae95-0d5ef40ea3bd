@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>舞台口令同步系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🎭 舞台排练口令同步系统</h1>
+    <span id="conn">未连接</span>
+  </header>
+  <main>
+    <div class="home-links">
+      <a href="director.html">
+        <b>导演端</b>
+        <span>创建演出序列：序号、口令内容、目标岗位与确认时限</span>
+      </a>
+      <a href="control.html">
+        <b>控制端</b>
+        <span>发出当前口令，监控各岗位确认状态，可指定临时替岗、撤回并纠正重发，全员确认后推进</span>
+      </a>
+      <a href="position.html">
+        <b>岗位端</b>
+        <span>仅目标岗位可确认当前口令，断线重连自动恢复状态</span>
+      </a>
+    </div>
+    <div class="card" style="margin-top:20px">
+      <h2>本场事件日志</h2>
+      <div class="log-box" id="log"><span class="muted">暂无事件</span></div>
+    </div>
+  </main>
+  <script src="common.js"></script>
+  <script>
+    const connEl = document.getElementById('conn');
+    const logEl = document.getElementById('log');
+    CueClient.connect({
+      role: 'viewer',
+      onState(state) {
+        logEl.innerHTML = state.log.length
+          ? CueClient.renderLog(state.log)
+          : '<span class="muted">暂无事件</span>';
+      },
+      onConnChange(on) {
+        connEl.textContent = on ? '已连接' : '连接断开，重连中…';
+        connEl.classList.toggle('on', on);
+      },
+    });
+  </script>
+</body>
+</html>

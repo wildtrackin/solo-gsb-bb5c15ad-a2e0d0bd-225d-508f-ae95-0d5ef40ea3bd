@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>控制端 · 口令控制台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🎛 控制端 · 口令控制台</h1>
+    <nav>
+      <a href="director.html">导演端</a>
+      <a href="position.html">岗位端</a>
+      <a href="index.html">首页</a>
+      <span id="conn">未连接</span>
+    </nav>
+  </header>
+  <main>
+    <div id="toast"></div>
+    <div class="status-banner" id="banner"></div>
+
+    <div class="card">
+      <h2>当前口令</h2>
+      <div id="cueArea"><p class="muted" style="text-align:center;padding:24px">等待开始</p></div>
+      <div class="countdown" id="countdown"></div>
+    </div>
+
+    <div class="card">
+      <h2>目标岗位确认状态</h2>
+      <div id="targets"><span class="muted">—</span></div>
+      <div class="substitute-panel" id="subPanel" style="display:none"></div>
+    </div>
+
+    <div class="card">
+      <h2>撤回并纠正重发</h2>
+      <div id="recallPanel"></div>
+    </div>
+
+    <div class="card">
+      <h2>本条口令修订档案（旧轮次只读历史）</h2>
+      <div id="attempts"><span class="muted">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>操作</h2>
+      <div class="row">
+        <button id="btnStart" class="narrow">▶ 开始演出</button>
+        <button id="btnAdvance" class="narrow">⏭ 推进下一条</button>
+        <button id="btnReset" class="danger narrow">↺ 重置场次</button>
+      </div>
+      <p class="muted">仅当全部目标岗位确认后才可推进；超时与重复确认会实时标记在下方日志。目标未确认时可点「替岗」，指定一名在线岗位临时接管（仅对本条口令生效）。口令有误且尚未全员确认时，可在上方「撤回并纠正重发」中填写撤回原因与修正版口令，旧轮次将封存为只读历史并重新开始完整确认时限。</p>
+    </div>
+
+    <div class="card">
+      <h2>序列进度</h2>
+      <table>
+        <thead><tr><th style="width:60px">序号</th><th>口令</th><th>目标岗位</th><th style="width:90px">状态</th></tr></thead>
+        <tbody id="seqTable"><tr><td colspan="4" class="muted">尚未创建序列</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>本场事件日志</h2>
+      <div class="log-box" id="log"><span class="muted">暂无事件</span></div>
+    </div>
+  </main>
+
+  <script src="common.js"></script>
+  <script>
+    const connEl = document.getElementById('conn');
+    const banner = document.getElementById('banner');
+    const cueArea = document.getElementById('cueArea');
+    const targetsEl = document.getElementById('targets');
+    const countdownEl = document.getElementById('countdown');
+    const seqTable = document.getElementById('seqTable');
+    const logEl = document.getElementById('log');
+    const subPanel = document.getElementById('subPanel');
+    const recallPanel = document.getElementById('recallPanel');
+    const attemptsEl = document.getElementById('attempts');
+    const toast = document.getElementById('toast');
+    const btnStart = document.getElementById('btnStart');
+    const btnAdvance = document.getElementById('btnAdvance');
+    const btnReset = document.getElementById('btnReset');
+
+    let toastTimer = null;
+    let lastState = null;
+    let countdownTimer = null;
+    let substitutingFor = null; // 正在为其选择替补的原岗位
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => (toast.style.display = 'none'), 3000);
+    }
+
+    btnStart.onclick = () => client.send({ type: 'start' });
+    btnAdvance.onclick = () => client.send({ type: 'advance' });
+    btnReset.onclick = () => {
+      if (confirm('确定重置本场？当前口令进度将清空（日志保留）。')) {
+        client.send({ type: 'reset' });
+      }
+    };
+
+    function targetChip(state, t, opts = {}) {
+      const conf = state.confirmations[t];
+      const timedOut = state.timedOut.includes(t);
+      const online = state.onlinePositions.includes(t);
+      let cls = 'chip', label = CueClient.escapeHtml(t);
+      // 原岗位已被替岗：划线置灰，标注接管的替补
+      if (opts.subbedOut) {
+        return `<span class="${cls} subbed">${label} · 已由 ${CueClient.escapeHtml(opts.subTo)} 接管</span>`;
+      }
+      if (conf && conf.late) { cls += ' late'; label += ' · 迟到确认'; }
+      else if (conf) { cls += ' ok'; label += ' · 已确认'; }
+      else if (timedOut) { cls += ' timeout'; label += ' · 超时未确认'; }
+      else { label += ' · 待确认'; }
+      if (opts.isSub) label += '（替岗）';
+      if (!online) { cls += ' offline'; label += '（离线）'; }
+      return `<span class="${cls}">${label}</span>`;
+    }
+
+    // 点击目标旁的「替岗」按钮，展开替补选择面板
+    targetsEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-subfrom]');
+      if (!btn) return;
+      substitutingFor = btn.dataset.subfrom;
+      if (lastState) render(lastState);
+    });
+
+    function renderSubPanel(state) {
+      const active = state.phase === 'active';
+      const cue = state.currentCue;
+      const subs = state.substitutions || {};
+      // 口令推进、目标已确认或已被替岗时，自动收起选择面板
+      if (substitutingFor && (!active || !cue || !cue.targets.includes(substitutingFor) ||
+          subs[substitutingFor] || state.confirmations[substitutingFor])) {
+        substitutingFor = null;
+      }
+      if (!substitutingFor) {
+        subPanel.style.display = 'none';
+        subPanel.innerHTML = '';
+        return;
+      }
+      const from = CueClient.escapeHtml(substitutingFor);
+      // 替补候选：在线且不是本条有效目标
+      const candidates = state.onlinePositions.filter((p) => !(state.effectiveTargets || []).includes(p));
+      subPanel.style.display = 'block';
+      if (candidates.length === 0) {
+        subPanel.innerHTML =
+          `<div class="row"><span class="narrow muted">暂无可接管「${from}」的在线岗位（需在线且非本条有效目标）</span>` +
+          `<button class="secondary narrow" id="subCancel">取消</button></div>`;
+      } else {
+        subPanel.innerHTML =
+          `<div class="row"><span class="narrow">为「${from}」指定替补：</span>` +
+          `<select id="subSelect">${candidates.map((p) =>
+            `<option value="${CueClient.escapeHtml(p)}">${CueClient.escapeHtml(p)}</option>`).join('')}</select>` +
+          `<button class="narrow" id="subGo">确认替岗</button>` +
+          `<button class="secondary narrow" id="subCancel">取消</button></div>` +
+          `<p class="muted">接管后原岗位不可再确认本条口令，替补的确认计入全员确认；仅对本条口令生效，下一条仍按导演编排执行。</p>`;
+        document.getElementById('subGo').onclick = () => {
+          const to = document.getElementById('subSelect').value;
+          // 携带当前轮次 attemptId：撤回后迟到的旧替岗请求会被服务端拒绝
+          client.send({ type: 'substitute', from: substitutingFor, to, attemptId: state.attemptId });
+        };
+      }
+      document.getElementById('subCancel').onclick = () => {
+        substitutingFor = null;
+        render(lastState);
+      };
+    }
+
+    // 撤回并纠正重发面板：仅当前口令进行中且尚未全员确认时可操作（已推进/已完成不可撤回）
+    function renderRecallPanel(state) {
+      const active = state.phase === 'active';
+      const allDone = active && (state.effectiveTargets || []).length > 0 &&
+        (state.effectiveTargets || []).every((t) => state.confirmations[t]);
+      // 面板模式不变时不重建 DOM，避免广播刷新清空正在填写的撤回原因/修正文本
+      const mode = !active ? 'idle' : allDone ? 'done' : 'form';
+      if (recallPanel.dataset.mode === mode) return;
+      recallPanel.dataset.mode = mode;
+      if (mode === 'idle') {
+        recallPanel.innerHTML = '<p class="muted">当前没有进行中的口令；已推进或已完成的口令不可撤回。</p>';
+        return;
+      }
+      if (mode === 'done') {
+        recallPanel.innerHTML = '<p class="muted">当前口令已全员确认完成，不可撤回；推进后即封存为只读历史。</p>';
+        return;
+      }
+      recallPanel.innerHTML =
+        `<div class="row"><label class="narrow" style="flex:0 0 auto">撤回原因</label>` +
+        `<input type="text" id="recallReason" placeholder="必填，如：口令内容有误 / 岗位变更" style="flex:1"></div>` +
+        `<div class="row"><label class="narrow" style="flex:0 0 auto">修正版口令</label>` +
+        `<input type="text" id="recallText" placeholder="必填，填写修正后的完整口令文本" style="flex:1">` +
+        `<button class="danger narrow" id="recallGo">↩ 撤回并按修正版重发</button></div>` +
+        `<p class="muted">撤回后：当前修订号递增，旧轮次的确认、超时、替岗与截止时间封存为只读历史，本轮状态清空并重新开始完整确认时限；迟到到达的旧轮次确认一律拒绝。</p>`;
+      document.getElementById('recallGo').onclick = () => {
+        const reason = document.getElementById('recallReason').value.trim();
+        const text = document.getElementById('recallText').value.trim();
+        if (!reason) return showToast('请填写撤回原因');
+        if (!text) return showToast('请填写修正版口令文本');
+        if (!confirm(`确定撤回第 ${state.revision} 版并发出修正版口令？旧轮次将封存且不可修改。`)) return;
+        client.send({ type: 'recall', reason, text });
+      };
+    }
+
+    function render(state) {
+      lastState = state;
+      const active = state.phase === 'active';
+      const cue = state.currentCue;
+
+      // 按钮可用性
+      btnStart.disabled = active || state.sequence.length === 0 || state.phase === 'done';
+      btnAdvance.disabled = !active;
+      btnReset.disabled = state.phase === 'idle' && state.sequence.length === 0;
+
+      // 顶部横幅
+      banner.className = 'status-banner';
+      if (state.phase === 'done') {
+        banner.classList.add('show');
+        banner.textContent = '🎉 全部口令已完成';
+      } else if (active && state.timedOut.length > 0) {
+        banner.classList.add('show', 'warn');
+        banner.textContent = `⚠ 以下岗位超时未确认：${state.timedOut.join('、')}（可等待其迟到确认）`;
+      }
+
+      // 当前口令（含当前修订号与修订原因）
+      if (active && cue) {
+        const revBadge = state.revision > 1
+          ? `<span class="rev-badge">当前修订：第 ${state.revision} 版</span>`
+          : '<span class="rev-badge rev-initial">第 1 版（原始口令）</span>';
+        const reasonLine = state.revision > 1 && state.revisionReason
+          ? `<p class="rev-reason">最近撤回原因：${CueClient.escapeHtml(state.revisionReason)}</p>` : '';
+        cueArea.innerHTML =
+          `<div class="big-cue"><span class="cue-seq">第 ${cue.seq} 条 / 共 ${state.sequence.length} 条</span>` +
+          `${revBadge}<div>${CueClient.escapeHtml(cue.text)}</div></div>${reasonLine}`;
+      } else if (state.phase === 'done') {
+        cueArea.innerHTML = '<p class="muted" style="text-align:center;padding:24px">本场演出序列已全部完成</p>';
+      } else {
+        cueArea.innerHTML = '<p class="muted" style="text-align:center;padding:24px">等待开始（请先在导演端创建序列）</p>';
+      }
+
+      // 目标岗位（含临时替岗：原岗位划线，替补以有效目标参与确认）
+      if (active && cue) {
+        const subs = state.substitutions || {};
+        targetsEl.innerHTML = cue.targets.map((t) => {
+          const sub = subs[t];
+          if (sub) {
+            return targetChip(state, t, { subbedOut: true, subTo: sub.substitute }) +
+              targetChip(state, sub.substitute, { isSub: true });
+          }
+          let html = targetChip(state, t, {});
+          if (!state.confirmations[t]) {
+            html += `<button class="mini" data-subfrom="${CueClient.escapeHtml(t)}">⇄ 替岗</button>`;
+          }
+          return html;
+        }).join('');
+      } else {
+        targetsEl.innerHTML = '<span class="muted">—</span>';
+      }
+      renderSubPanel(state);
+      renderRecallPanel(state);
+
+      // 本条口令的只读旧轮次历史（撤回封存、完成封存）
+      if (active && cue && state.cueHistory && state.cueHistory[cue.id]) {
+        const html = CueClient.renderAttempts(state.cueHistory[cue.id], cue);
+        attemptsEl.innerHTML = html || '<span class="muted">本条口令尚无被封存的旧轮次</span>';
+      } else {
+        attemptsEl.innerHTML = '<span class="muted">—</span>';
+      }
+
+      // 序列进度（状态列附修订号）
+      if (state.sequence.length === 0) {
+        seqTable.innerHTML = '<tr><td colspan="4" class="muted">尚未创建序列</td></tr>';
+      } else {
+        seqTable.innerHTML = state.sequence.map((c, i) => {
+          const h = state.cueHistory && state.cueHistory[c.id];
+          const rev = h ? h.revision : 1;
+          let status;
+          if (state.phase === 'done' || i < state.currentIndex) status = '<span class="chip ok">已完成</span>';
+          else if (active && i === state.currentIndex) status = '<span class="chip late">进行中</span>';
+          else status = '<span class="chip">待执行</span>';
+          if (rev > 1) status += ` <span class="chip late">修订 ${rev} 版</span>`;
+          const cur = active && i === state.currentIndex;
+          return `<tr class="${cur ? 'current-row' : ''}"><td>${c.seq}</td>` +
+            `<td>${CueClient.escapeHtml(c.text)}</td>` +
+            `<td>${c.targets.map((t) => `<span class="chip">${CueClient.escapeHtml(t)}</span>`).join('')}</td>` +
+            `<td>${status}</td></tr>`;
+        }).join('');
+      }
+
+      logEl.innerHTML = state.log.length
+        ? CueClient.renderLog(state.log)
+        : '<span class="muted">暂无事件</span>';
+
+      // 倒计时（以服务端时间为准，本地每秒刷新显示）
+      clearInterval(countdownTimer);
+      if (active && state.deadline) {
+        const offset = state.serverNow - Date.now();
+        const tick = () => {
+          const remain = Math.max(0, state.deadline - (Date.now() + offset));
+          countdownEl.textContent = remain > 0
+            ? `确认倒计时：${Math.ceil(remain / 1000)} 秒`
+            : '已超时，等待迟到确认…';
+        };
+        tick();
+        countdownTimer = setInterval(tick, 500);
+      } else {
+        countdownEl.textContent = '';
+      }
+    }
+
+    const client = CueClient.connect({
+      role: 'control',
+      onState: render,
+      onError: showToast,
+      onConnChange(on) {
+        connEl.textContent = on ? '已连接' : '连接断开，重连中…';
+        connEl.classList.toggle('on', on);
+      },
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>岗位端 · 口令确认</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🎧 岗位端 · 口令确认</h1>
+    <nav>
+      <a href="director.html">导演端</a>
+      <a href="control.html">控制端</a>
+      <a href="index.html">首页</a>
+      <span id="conn">未连接</span>
+    </nav>
+  </header>
+  <main>
+    <div id="toast"></div>
+
+    <div class="card">
+      <h2>我的岗位</h2>
+      <div class="row">
+        <input type="text" id="positionName" placeholder="输入岗位名，如：灯光 / 音响 / 道具">
+        <button class="narrow" id="setPosition">上岗</button>
+      </div>
+      <p class="muted">岗位名需与导演端序列中的目标岗位完全一致；刷新或断线重连后自动恢复。</p>
+    </div>
+
+    <div class="status-banner" id="banner"></div>
+
+    <div class="card">
+      <h2>当前口令</h2>
+      <div id="cueArea"><p class="muted" style="text-align:center;padding:24px">等待控制端发出口令</p></div>
+      <div class="countdown" id="countdown"></div>
+    </div>
+
+    <div class="card" style="text-align:center">
+      <button id="btnConfirm" style="font-size:22px;padding:18px 64px" disabled>✔ 确认收到</button>
+      <p class="muted" style="margin-top:10px" id="confirmHint">仅当本岗位是当前口令的有效目标（含临时替岗接管）时可确认</p>
+    </div>
+
+    <div class="card">
+      <h2>本条口令修订档案（旧轮次只读历史）</h2>
+      <div id="attempts"><span class="muted">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>本场事件日志</h2>
+      <div class="log-box" id="log"><span class="muted">暂无事件</span></div>
+    </div>
+  </main>
+
+  <script src="common.js"></script>
+  <script>
+    const connEl = document.getElementById('conn');
+    const banner = document.getElementById('banner');
+    const cueArea = document.getElementById('cueArea');
+    const countdownEl = document.getElementById('countdown');
+    const logEl = document.getElementById('log');
+    const attemptsEl = document.getElementById('attempts');
+    const toast = document.getElementById('toast');
+    const btnConfirm = document.getElementById('btnConfirm');
+    const confirmHint = document.getElementById('confirmHint');
+    const positionInput = document.getElementById('positionName');
+
+    let toastTimer = null;
+    let countdownTimer = null;
+    let myPosition = localStorage.getItem('cuePosition') || '';
+    positionInput.value = myPosition;
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => (toast.style.display = 'none'), 3000);
+    }
+
+    document.getElementById('setPosition').onclick = () => {
+      const name = positionInput.value.trim();
+      if (!name) return showToast('请输入岗位名');
+      myPosition = name;
+      localStorage.setItem('cuePosition', name);
+      client.rehello(); // 重新向服务端登记岗位
+      showToast(`已上岗：${name}`);
+    };
+
+    let lastState = null;
+    btnConfirm.onclick = () => {
+      // 必须携带当前快照中的 attemptId；口令被撤回后，旧轮次确认会被服务端拒绝
+      if (lastState && lastState.attemptId) {
+        client.send({ type: 'confirm', attemptId: lastState.attemptId });
+      }
+    };
+
+    function render(state) {
+      lastState = state;
+      const active = state.phase === 'active';
+      const cue = state.currentCue;
+      const subs = state.substitutions || {};
+      const revision = state.revision || 1;
+      // 有效目标含临时替岗：被接管的原岗位不再可确认，替补可确认
+      const effTargets = state.effectiveTargets || (cue ? cue.targets : []);
+      const targeted = active && cue && myPosition && effTargets.includes(myPosition);
+      const myConf = targeted && state.confirmations[myPosition];
+      const iTimedOut = targeted && state.timedOut.includes(myPosition);
+      // 我作为替补接管了哪个原岗位；我的岗位被哪个替补接管
+      const subbedFor = active && cue
+        ? Object.keys(subs).find((from) => subs[from].substitute === myPosition)
+        : null;
+      const replacedBy = active && cue && subs[myPosition] ? subs[myPosition].substitute : null;
+
+      // 横幅（修订重发优先提示：撤回后本轮状态已清空，需按新版本重新确认）
+      banner.className = 'status-banner';
+      if (revision > 1) {
+        banner.classList.add('show', 'warn');
+        banner.textContent = `↩ 口令已撤回并修订重发（当前第 ${revision} 版），请按下方最新口令重新确认`;
+      } else if (myConf && myConf.late) {
+        banner.classList.add('show', 'warn');
+        banner.textContent = '⚠ 已迟到确认（超过确认时限）';
+      } else if (myConf) {
+        banner.classList.add('show');
+        banner.textContent = '✔ 已确认，等待控制端推进';
+      } else if (iTimedOut) {
+        banner.classList.add('show', 'warn');
+        banner.textContent = '⚠ 已超时！请立即确认（将标记为迟到确认）';
+      } else if (subbedFor) {
+        banner.classList.add('show', 'warn');
+        banner.textContent = `⚑ 临时替岗：本岗位已接管「${subbedFor}」的确认任务，请及时确认`;
+      } else if (replacedBy) {
+        banner.classList.add('show');
+        banner.textContent = `本条口令的确认任务已移交「${replacedBy}」，本岗位无需操作`;
+      }
+
+      // 口令展示（含当前修订号与撤回原因）
+      if (active && cue) {
+        const revBadge = revision > 1
+          ? `<span class="rev-badge">当前修订：第 ${revision} 版</span>`
+          : '<span class="rev-badge rev-initial">第 1 版（原始口令）</span>';
+        const head = `<span class="cue-seq">第 ${cue.seq} 条 / 共 ${state.sequence.length} 条</span>${revBadge}`;
+        const reasonLine = revision > 1 && state.revisionReason
+          ? `<p class="rev-reason">撤回原因：${CueClient.escapeHtml(state.revisionReason)}</p>` : '';
+        let note = '';
+        if (!targeted) {
+          note = replacedBy
+            ? `<p class="muted" style="text-align:center">本条口令的确认任务已移交「${CueClient.escapeHtml(replacedBy)}」，本岗位无需操作</p>`
+            : '<p class="muted" style="text-align:center">本条口令不涉及本岗位，无需操作</p>';
+        } else if (subbedFor) {
+          note = `<p class="muted" style="text-align:center">⚑ 本岗位临时接管「${CueClient.escapeHtml(subbedFor)}」的确认任务</p>`;
+        }
+        cueArea.innerHTML = `<div class="big-cue">${head}${CueClient.escapeHtml(cue.text)}</div>${reasonLine}${note}`;
+      } else if (state.phase === 'done') {
+        cueArea.innerHTML = '<p class="muted" style="text-align:center;padding:24px">本场演出序列已全部完成</p>';
+      } else {
+        cueArea.innerHTML = '<p class="muted" style="text-align:center;padding:24px">等待控制端发出口令</p>';
+      }
+
+      // 本条口令只读旧轮次历史
+      if (active && cue && state.cueHistory && state.cueHistory[cue.id]) {
+        const html = CueClient.renderAttempts(state.cueHistory[cue.id], cue);
+        attemptsEl.innerHTML = html || '<span class="muted">本条口令尚无被撤回的旧轮次</span>';
+      } else {
+        attemptsEl.innerHTML = '<span class="muted">—</span>';
+      }
+
+      // 确认按钮：仅有效目标（含替补）且未确认时可点
+      btnConfirm.disabled = !targeted || !!myConf;
+      if (!myPosition) confirmHint.textContent = '请先在上方输入岗位名并上岗';
+      else if (!active) confirmHint.textContent = '当前没有进行中的口令';
+      else if (replacedBy && !targeted) confirmHint.textContent = `本岗位的确认任务已由「${replacedBy}」接管，无需确认`;
+      else if (!targeted) confirmHint.textContent = `本岗位「${myPosition}」不是本条口令的目标岗位`;
+      else if (myConf) confirmHint.textContent = '已确认，请勿重复操作（重复确认将被标记）';
+      else if (subbedFor) confirmHint.textContent = `本岗位已接管「${subbedFor}」的确认任务，请确认收到口令`;
+      else confirmHint.textContent = '请确认收到口令';
+
+      logEl.innerHTML = state.log.length
+        ? CueClient.renderLog(state.log)
+        : '<span class="muted">暂无事件</span>';
+
+      // 倒计时
+      clearInterval(countdownTimer);
+      if (targeted && !myConf && state.deadline) {
+        const offset = state.serverNow - Date.now();
+        const tick = () => {
+          const remain = Math.max(0, state.deadline - (Date.now() + offset));
+          countdownEl.textContent = remain > 0
+            ? `确认倒计时：${Math.ceil(remain / 1000)} 秒`
+            : '已超时，确认将被标记为迟到';
+        };
+        tick();
+        countdownTimer = setInterval(tick, 500);
+      } else {
+        countdownEl.textContent = '';
+      }
+    }
+
+    const client = CueClient.connect({
+      role: 'position',
+      getPosition: () => myPosition || null,
+      onState: render,
+      onError: showToast,
+      onConnChange(on) {
+        connEl.textContent = on ? '已连接' : '连接断开，重连中…';
+        connEl.classList.toggle('on', on);
+      },
+    });
+  </script>
+</body>
+</html>

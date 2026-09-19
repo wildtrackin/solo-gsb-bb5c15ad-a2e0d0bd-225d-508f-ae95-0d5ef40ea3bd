@@ -1,0 +1,11 @@
+services:
+  cue-sync:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+    volumes:
+      # 挂载事件日志目录，容器重启后本场日志仍可查阅
+      - ./data:/app/data
+    restart: unless-stopped

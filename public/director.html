@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>导演端 · 演出序列编排</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🎬 导演端 · 演出序列编排</h1>
+    <nav>
+      <a href="control.html">控制端</a>
+      <a href="position.html">岗位端</a>
+      <a href="index.html">首页</a>
+      <span id="conn">未连接</span>
+    </nav>
+  </header>
+  <main>
+    <div id="toast"></div>
+    <div class="status-banner" id="banner"></div>
+
+    <div class="card">
+      <h2>新建 / 编辑演出序列（演出进行中不可修改）</h2>
+      <div id="cueRows"></div>
+      <div class="row">
+        <button class="secondary narrow" id="addRow">＋ 添加口令</button>
+        <label class="narrow" style="display:flex;align-items:center;gap:8px;flex:0 0 auto">
+          确认时限（秒）
+          <input type="number" id="timeoutSec" value="30" min="3" max="600" style="width:80px">
+        </label>
+        <button id="saveSeq" class="narrow">保存序列</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>当前序列</h2>
+      <table>
+        <thead><tr><th style="width:60px">序号</th><th>口令</th><th>目标岗位</th></tr></thead>
+        <tbody id="seqTable"><tr><td colspan="3" class="muted">尚未创建序列</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>本场事件日志</h2>
+      <div class="log-box" id="log"><span class="muted">暂无事件</span></div>
+    </div>
+  </main>
+
+  <script src="common.js"></script>
+  <script>
+    const connEl = document.getElementById('conn');
+    const banner = document.getElementById('banner');
+    const cueRows = document.getElementById('cueRows');
+    const seqTable = document.getElementById('seqTable');
+    const logEl = document.getElementById('log');
+    const toast = document.getElementById('toast');
+    let toastTimer = null;
+    let lastState = null;
+
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => (toast.style.display = 'none'), 3000);
+    }
+
+    function addRow(text = '', targets = '') {
+      const div = document.createElement('div');
+      div.className = 'row';
+      div.innerHTML =
+        `<span class="narrow row-seq" style="flex:0 0 32px;color:#8ab4ff"></span>` +
+        `<input type="text" class="cue-text" placeholder="口令内容，如：灯光渐暗，音乐起" value="${CueClient.escapeHtml(text)}">` +
+        `<input type="text" class="cue-targets" placeholder="目标岗位，逗号分隔，如：灯光,音响" value="${CueClient.escapeHtml(targets)}">` +
+        `<button class="danger narrow del-row">删除</button>`;
+      div.querySelector('.del-row').onclick = () => { div.remove(); renumber(); };
+      cueRows.appendChild(div);
+      renumber();
+    }
+
+    function renumber() {
+      cueRows.querySelectorAll('.row-seq').forEach((el, i) => (el.textContent = i + 1));
+    }
+
+    document.getElementById('addRow').onclick = () => addRow();
+
+    document.getElementById('saveSeq').onclick = () => {
+      const cues = [...cueRows.querySelectorAll('.row')].map((row) => ({
+        text: row.querySelector('.cue-text').value.trim(),
+        targets: row.querySelector('.cue-targets').value
+          .split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+      }));
+      client.send({
+        type: 'setSequence',
+        cues,
+        timeoutSec: Number(document.getElementById('timeoutSec').value),
+      });
+    };
+
+    function render(state) {
+      lastState = state;
+      const editingLocked = state.phase !== 'idle';
+      document.getElementById('saveSeq').disabled = editingLocked;
+      document.getElementById('addRow').disabled = editingLocked;
+      banner.className = 'status-banner' + (editingLocked ? ' show' : '');
+      banner.textContent = editingLocked
+        ? (state.phase === 'active' ? '演出进行中，序列已锁定' : '本场已结束，控制端重置后可重新编辑')
+        : '';
+
+      if (state.sequence.length === 0) {
+        seqTable.innerHTML = '<tr><td colspan="3" class="muted">尚未创建序列</td></tr>';
+      } else {
+        seqTable.innerHTML = state.sequence.map((c, i) => {
+          const cur = state.phase === 'active' && i === state.currentIndex;
+          return `<tr class="${cur ? 'current-row' : ''}"><td>${c.seq}</td>` +
+            `<td>${CueClient.escapeHtml(c.text)}</td>` +
+            `<td>${c.targets.map((t) => `<span class="chip">${CueClient.escapeHtml(t)}</span>`).join('')}</td></tr>`;
+        }).join('');
+      }
+      logEl.innerHTML = state.log.length
+        ? CueClient.renderLog(state.log)
+        : '<span class="muted">暂无事件</span>';
+    }
+
+    const client = CueClient.connect({
+      role: 'director',
+      onState: render,
+      onError: showToast,
+      onConnChange(on) {
+        connEl.textContent = on ? '已连接' : '连接断开，重连中…';
+        connEl.classList.toggle('on', on);
+      },
+    });
+
+    addRow(); // 默认一行
+  </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{"ts":"2026-09-19T00:58:29.201Z","event":"position-online","detail":{"position":"灯光"}}
+{"ts":"2026-09-19T00:58:29.205Z","event":"position-online","detail":{"position":"音响"}}
+{"ts":"2026-09-19T00:58:29.207Z","event":"position-online","detail":{"position":"道具"}}
+{"ts":"2026-09-19T00:58:29.413Z","event":"session-reset","detail":{}}
+{"ts":"2026-09-19T00:58:29.434Z","event":"sequence-set","detail":{"count":3,"timeoutSec":3,"cues":[{"seq":1,"text":"灯光渐暗","targets":["灯光"]},{"seq":2,"text":"音乐起，道具就位","targets":["音响","道具"]},{"seq":3,"text":"全场亮灯","targets":["灯光","音响"]}]}}
+{"ts":"2026-09-19T00:58:29.455Z","event":"session-start","detail":{}}
