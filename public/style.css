@@ -87,6 +87,7 @@ tr.current-row td { background: #24304a; }
 .chip.ok { background: #23402a; color: #8fe3a5; }
 .chip.late { background: #4a3a1e; color: #f0c169; }
 .chip.timeout { background: #4a2b2b; color: #ff9c9c; }
+.chip.paused { background: #23354f; color: #9cc3ff; }
 .chip.offline { opacity: 0.45; }
 .chip.subbed { opacity: 0.45; text-decoration: line-through; }
 
@@ -150,9 +151,13 @@ tr.current-row td { background: #24304a; }
 }
 .status-banner.show { display: block; }
 .status-banner.warn { background: #4a3a1e; color: #f0c169; }
+.status-banner.paused { background: #23354f; color: #9cc3ff; }
 
 .countdown { font-size: 15px; color: #f0c169; text-align: center; margin-top: 6px; }
 .muted { color: #7c8398; font-size: 13px; }
+
+/* 暂停状态 */
+.pause-info { font-size: 15px; color: #9cc3ff; margin-bottom: 6px; }
 
 /* 修订号 / 撤回原因 */
 .rev-badge {

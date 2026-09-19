@@ -1,0 +1,6 @@
+{"ts":"2026-09-19T03:03:34.076Z","event":"sequence-set","detail":{"count":1,"timeoutSec":10,"cues":[{"seq":1,"text":"测试口令","targets":["灯光"]}]}}
+{"ts":"2026-09-19T03:03:34.276Z","event":"session-start","detail":{}}
+{"ts":"2026-09-19T03:03:34.276Z","event":"cue-started","detail":{"seq":1,"text":"测试口令","targets":["灯光"],"revision":1,"attemptId":"253bb0a0-33ad-49be-8b7e-9e8e6d663235"}}
+{"ts":"2026-09-19T03:03:34.577Z","event":"cue-paused","detail":{"seq":1,"revision":1,"attemptId":"253bb0a0-33ad-49be-8b7e-9e8e6d663235","reason":"手动验证暂停","operator":"manual-check","remainingSec":10}}
+{"ts":"2026-09-19T03:03:34.879Z","event":"cue-resumed","detail":{"seq":1,"revision":1,"attemptId":"253bb0a0-33ad-49be-8b7e-9e8e6d663235","operator":"manual-check","reason":"手动验证暂停","pausedBy":"manual-check","pausedAt":"2026-09-19T03:03:34.576Z","pauseDurationMs":303,"remainingSec":10}}
+{"ts":"2026-09-19T03:03:35.180Z","event":"session-reset","detail":{}}

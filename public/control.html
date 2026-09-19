@@ -27,6 +27,11 @@
     </div>
 
     <div class="card">
+      <h2>暂停 / 恢复当前口令</h2>
+      <div id="pausePanel"></div>
+    </div>
+
+    <div class="card">
       <h2>目标岗位确认状态</h2>
       <div id="targets"><span class="muted">—</span></div>
       <div class="substitute-panel" id="subPanel" style="display:none"></div>
@@ -49,7 +54,7 @@
         <button id="btnAdvance" class="narrow">⏭ 推进下一条</button>
         <button id="btnReset" class="danger narrow">↺ 重置场次</button>
       </div>
-      <p class="muted">仅当全部目标岗位确认后才可推进；超时与重复确认会实时标记在下方日志。目标未确认时可点「替岗」，指定一名在线岗位临时接管（仅对本条口令生效）。口令有误且尚未全员确认时，可在上方「撤回并纠正重发」中填写撤回原因与修正版口令，旧轮次将封存为只读历史并重新开始完整确认时限。</p>
+      <p class="muted">仅当全部目标岗位确认后才可推进；超时与重复确认会实时标记在下方日志。目标未确认时可点「替岗」，指定一名在线岗位临时接管（仅对本条口令生效）。口令有误且尚未全员确认时，可在上方「撤回并纠正重发」中填写撤回原因与修正版口令，旧轮次将封存为只读历史并重新开始完整确认时限。口令进行中有突发情况时，可在上方「暂停 / 恢复当前口令」中填写原因暂停计时，恢复后按冻结余量继续。</p>
     </div>
 
     <div class="card">
@@ -77,6 +82,7 @@
     const logEl = document.getElementById('log');
     const subPanel = document.getElementById('subPanel');
     const recallPanel = document.getElementById('recallPanel');
+    const pausePanel = document.getElementById('pausePanel');
     const attemptsEl = document.getElementById('attempts');
     const toast = document.getElementById('toast');
     const btnStart = document.getElementById('btnStart');
@@ -133,8 +139,8 @@
       const active = state.phase === 'active';
       const cue = state.currentCue;
       const subs = state.substitutions || {};
-      // 口令推进、目标已确认或已被替岗时，自动收起选择面板
-      if (substitutingFor && (!active || !cue || !cue.targets.includes(substitutingFor) ||
+      // 口令暂停、推进、目标已确认或已被替岗时，自动收起选择面板
+      if (substitutingFor && (!active || state.paused || !cue || !cue.targets.includes(substitutingFor) ||
           subs[substitutingFor] || state.confirmations[substitutingFor])) {
         substitutingFor = null;
       }
@@ -171,17 +177,63 @@
       };
     }
 
+    // 暂停/恢复面板：进行中且尚未全员确认时可暂停（必填原因）；暂停中显示原因与冻结余量，可恢复
+    function renderPausePanel(state) {
+      const active = state.phase === 'active';
+      const allDone = active && (state.effectiveTargets || []).length > 0 &&
+        (state.effectiveTargets || []).every((t) => state.confirmations[t]);
+      // 面板模式不变时不重建 DOM，避免广播刷新清空正在填写的暂停原因
+      const mode = !active ? 'idle' : state.paused ? 'paused' : allDone ? 'done' : 'form';
+      if (pausePanel.dataset.mode === mode) return;
+      pausePanel.dataset.mode = mode;
+      if (mode === 'idle') {
+        pausePanel.innerHTML = '<p class="muted">当前没有进行中的口令。</p>';
+        return;
+      }
+      if (mode === 'done') {
+        pausePanel.innerHTML = '<p class="muted">当前口令已全员确认，可直接推进，无需暂停。</p>';
+        return;
+      }
+      if (mode === 'paused') {
+        const remainSec = Math.ceil((state.pausedRemainingMs || 0) / 1000);
+        pausePanel.innerHTML =
+          `<p class="pause-info">⏸ 已暂停：${CueClient.escapeHtml(state.pauseReason || '')}</p>` +
+          `<p class="muted">${CueClient.fmtTime(state.pausedAt)} 起暂停，剩余确认时间冻结为 ${remainSec} 秒；` +
+          `暂停期间岗位确认、替岗、撤回与推进均被服务端拒绝。</p>` +
+          `<div class="row"><button class="narrow" id="resumeGo">▶ 恢复计时（按冻结余量继续）</button></div>`;
+        document.getElementById('resumeGo').onclick = () => {
+          client.send({ type: 'resume', attemptId: state.attemptId });
+        };
+        return;
+      }
+      pausePanel.innerHTML =
+        `<div class="row"><label class="narrow" style="flex:0 0 auto">暂停原因</label>` +
+        `<input type="text" id="pauseReason" placeholder="必填，如：设备检修 / 演员暂离" style="flex:1">` +
+        `<button class="secondary narrow" id="pauseGo">⏸ 暂停口令</button></div>` +
+        `<p class="muted">暂停后服务端冻结剩余确认时长并撤销本轮计时器，各端显示暂停原因与剩余秒数；` +
+        `恢复时沿用同一轮次按冻结余量重新计时，重复暂停/恢复不累计误差。</p>`;
+      document.getElementById('pauseGo').onclick = () => {
+        const reason = document.getElementById('pauseReason').value.trim();
+        if (!reason) return showToast('请填写暂停原因');
+        client.send({ type: 'pause', reason, attemptId: state.attemptId });
+      };
+    }
+
     // 撤回并纠正重发面板：仅当前口令进行中且尚未全员确认时可操作（已推进/已完成不可撤回）
     function renderRecallPanel(state) {
       const active = state.phase === 'active';
       const allDone = active && (state.effectiveTargets || []).length > 0 &&
         (state.effectiveTargets || []).every((t) => state.confirmations[t]);
       // 面板模式不变时不重建 DOM，避免广播刷新清空正在填写的撤回原因/修正文本
-      const mode = !active ? 'idle' : allDone ? 'done' : 'form';
+      const mode = !active ? 'idle' : state.paused ? 'paused' : allDone ? 'done' : 'form';
       if (recallPanel.dataset.mode === mode) return;
       recallPanel.dataset.mode = mode;
       if (mode === 'idle') {
         recallPanel.innerHTML = '<p class="muted">当前没有进行中的口令；已推进或已完成的口令不可撤回。</p>';
+        return;
+      }
+      if (mode === 'paused') {
+        recallPanel.innerHTML = '<p class="muted">口令已暂停，恢复计时后方可撤回纠正。</p>';
         return;
       }
       if (mode === 'done') {
@@ -210,16 +262,20 @@
       const active = state.phase === 'active';
       const cue = state.currentCue;
 
-      // 按钮可用性
+      // 按钮可用性（暂停期间禁止推进，服务端同样拒绝）
       btnStart.disabled = active || state.sequence.length === 0 || state.phase === 'done';
-      btnAdvance.disabled = !active;
+      btnAdvance.disabled = !active || !!state.paused;
       btnReset.disabled = state.phase === 'idle' && state.sequence.length === 0;
 
-      // 顶部横幅
+      // 顶部横幅（暂停优先展示：原因 + 冻结的剩余秒数）
       banner.className = 'status-banner';
       if (state.phase === 'done') {
         banner.classList.add('show');
         banner.textContent = '🎉 全部口令已完成';
+      } else if (active && state.paused) {
+        banner.classList.add('show', 'paused');
+        const remainSec = Math.ceil((state.pausedRemainingMs || 0) / 1000);
+        banner.textContent = `⏸ 口令已暂停：${state.pauseReason}（剩余确认时间冻结为 ${remainSec} 秒）`;
       } else if (active && state.timedOut.length > 0) {
         banner.classList.add('show', 'warn');
         banner.textContent = `⚠ 以下岗位超时未确认：${state.timedOut.join('、')}（可等待其迟到确认）`;
@@ -251,7 +307,8 @@
               targetChip(state, sub.substitute, { isSub: true });
           }
           let html = targetChip(state, t, {});
-          if (!state.confirmations[t]) {
+          // 暂停期间不提供替岗入口（服务端同样拒绝）
+          if (!state.confirmations[t] && !state.paused) {
             html += `<button class="mini" data-subfrom="${CueClient.escapeHtml(t)}">⇄ 替岗</button>`;
           }
           return html;
@@ -261,6 +318,7 @@
       }
       renderSubPanel(state);
       renderRecallPanel(state);
+      renderPausePanel(state);
 
       // 本条口令的只读旧轮次历史（撤回封存、完成封存）
       if (active && cue && state.cueHistory && state.cueHistory[cue.id]) {
@@ -279,6 +337,7 @@
           const rev = h ? h.revision : 1;
           let status;
           if (state.phase === 'done' || i < state.currentIndex) status = '<span class="chip ok">已完成</span>';
+          else if (active && i === state.currentIndex && state.paused) status = '<span class="chip paused">已暂停</span>';
           else if (active && i === state.currentIndex) status = '<span class="chip late">进行中</span>';
           else status = '<span class="chip">待执行</span>';
           if (rev > 1) status += ` <span class="chip late">修订 ${rev} 版</span>`;
@@ -294,9 +353,12 @@
         ? CueClient.renderLog(state.log)
         : '<span class="muted">暂无事件</span>';
 
-      // 倒计时（以服务端时间为准，本地每秒刷新显示）
+      // 倒计时（以服务端时间为准，本地每秒刷新显示；暂停时展示冻结的剩余秒数）
       clearInterval(countdownTimer);
-      if (active && state.deadline) {
+      if (active && state.paused) {
+        const remainSec = Math.ceil((state.pausedRemainingMs || 0) / 1000);
+        countdownEl.textContent = `⏸ 确认计时已暂停，剩余 ${remainSec} 秒（已冻结）`;
+      } else if (active && state.deadline) {
         const offset = state.serverNow - Date.now();
         const tick = () => {
           const remain = Math.max(0, state.deadline - (Date.now() + offset));

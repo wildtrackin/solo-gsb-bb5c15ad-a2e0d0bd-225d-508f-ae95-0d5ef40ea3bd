@@ -111,9 +111,13 @@
         : null;
       const replacedBy = active && cue && subs[myPosition] ? subs[myPosition].substitute : null;
 
-      // 横幅（修订重发优先提示：撤回后本轮状态已清空，需按新版本重新确认）
+      // 横幅（暂停最优先：全端展示暂停原因与冻结的剩余秒数；其次修订重发提示）
       banner.className = 'status-banner';
-      if (revision > 1) {
+      if (active && state.paused) {
+        banner.classList.add('show', 'paused');
+        const remainSec = Math.ceil((state.pausedRemainingMs || 0) / 1000);
+        banner.textContent = `⏸ 口令已暂停：${state.pauseReason}（剩余确认时间冻结为 ${remainSec} 秒），待控制端恢复`;
+      } else if (revision > 1) {
         banner.classList.add('show', 'warn');
         banner.textContent = `↩ 口令已撤回并修订重发（当前第 ${revision} 版），请按下方最新口令重新确认`;
       } else if (myConf && myConf.late) {
@@ -164,10 +168,11 @@
         attemptsEl.innerHTML = '<span class="muted">—</span>';
       }
 
-      // 确认按钮：仅有效目标（含替补）且未确认时可点
-      btnConfirm.disabled = !targeted || !!myConf;
+      // 确认按钮：仅有效目标（含替补）且未确认、未暂停时可点
+      btnConfirm.disabled = !targeted || !!myConf || !!(active && state.paused);
       if (!myPosition) confirmHint.textContent = '请先在上方输入岗位名并上岗';
       else if (!active) confirmHint.textContent = '当前没有进行中的口令';
+      else if (state.paused) confirmHint.textContent = `口令已暂停（原因：${state.pauseReason}），待控制端恢复后可确认`;
       else if (replacedBy && !targeted) confirmHint.textContent = `本岗位的确认任务已由「${replacedBy}」接管，无需确认`;
       else if (!targeted) confirmHint.textContent = `本岗位「${myPosition}」不是本条口令的目标岗位`;
       else if (myConf) confirmHint.textContent = '已确认，请勿重复操作（重复确认将被标记）';
@@ -178,9 +183,12 @@
         ? CueClient.renderLog(state.log)
         : '<span class="muted">暂无事件</span>';
 
-      // 倒计时
+      // 倒计时（暂停时展示冻结的剩余秒数）
       clearInterval(countdownTimer);
-      if (targeted && !myConf && state.deadline) {
+      if (active && state.paused) {
+        const remainSec = Math.ceil((state.pausedRemainingMs || 0) / 1000);
+        countdownEl.textContent = `⏸ 确认计时已暂停，剩余 ${remainSec} 秒（已冻结）`;
+      } else if (targeted && !myConf && state.deadline) {
         const offset = state.serverNow - Date.now();
         const tick = () => {
           const remain = Math.max(0, state.deadline - (Date.now() + offset));
