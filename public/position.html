@@ -97,6 +97,7 @@
     function render(state) {
       lastState = state;
       const active = state.phase === 'active';
+      const paused = active && state.paused;
       const cue = state.currentCue;
       const subs = state.substitutions || {};
       const revision = state.revision || 1;
@@ -111,9 +112,12 @@
         : null;
       const replacedBy = active && cue && subs[myPosition] ? subs[myPosition].substitute : null;
 
-      // 横幅（修订重发优先提示：撤回后本轮状态已清空，需按新版本重新确认）
+      // 横幅（暂停状态最优先：冻结期间各操作均被拒绝；其次是修订重发提示）
       banner.className = 'status-banner';
-      if (revision > 1) {
+      if (paused) {
+        banner.classList.add('show', 'warn');
+        banner.textContent = `⏸ 口令已暂停（剩余 ${Math.ceil((state.remainingMs || 0) / 1000)} 秒）：${state.pauseReason || ''}，等待控制端恢复`;
+      } else if (revision > 1) {
         banner.classList.add('show', 'warn');
         banner.textContent = `↩ 口令已撤回并修订重发（当前第 ${revision} 版），请按下方最新口令重新确认`;
       } else if (myConf && myConf.late) {
@@ -164,10 +168,11 @@
         attemptsEl.innerHTML = '<span class="muted">—</span>';
       }
 
-      // 确认按钮：仅有效目标（含替补）且未确认时可点
-      btnConfirm.disabled = !targeted || !!myConf;
+      // 确认按钮：仅有效目标（含替补）且未确认时可点；暂停期间禁用
+      btnConfirm.disabled = !targeted || !!myConf || paused;
       if (!myPosition) confirmHint.textContent = '请先在上方输入岗位名并上岗';
       else if (!active) confirmHint.textContent = '当前没有进行中的口令';
+      else if (paused) confirmHint.textContent = `口令已暂停（${state.pauseReason || ''}），等待控制端恢复后再确认`;
       else if (replacedBy && !targeted) confirmHint.textContent = `本岗位的确认任务已由「${replacedBy}」接管，无需确认`;
       else if (!targeted) confirmHint.textContent = `本岗位「${myPosition}」不是本条口令的目标岗位`;
       else if (myConf) confirmHint.textContent = '已确认，请勿重复操作（重复确认将被标记）';
@@ -178,9 +183,12 @@
         ? CueClient.renderLog(state.log)
         : '<span class="muted">暂无事件</span>';
 
-      // 倒计时
+      // 倒计时（暂停时冻结显示剩余秒数与原因）
       clearInterval(countdownTimer);
-      if (targeted && !myConf && state.deadline) {
+      if (paused) {
+        countdownEl.textContent =
+          `⏸ 已暂停，剩余 ${Math.ceil((state.remainingMs || 0) / 1000)} 秒（冻结）：${state.pauseReason || ''}`;
+      } else if (targeted && !myConf && state.deadline) {
         const offset = state.serverNow - Date.now();
         const tick = () => {
           const remain = Math.max(0, state.deadline - (Date.now() + offset));

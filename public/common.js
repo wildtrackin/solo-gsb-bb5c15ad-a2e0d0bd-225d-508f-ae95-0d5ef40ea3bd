@@ -78,6 +78,9 @@ const CueClient = (() => {
     'cue-timeout': '确认超时',
     'cue-recalled': '撤回并纠正重发',
     'cue-resent': '修订版重新发出',
+    'cue-paused': '口令暂停',
+    'cue-resumed': '口令恢复',
+    'paused-confirm-rejected': '暂停中确认被拒',
     'stale-confirm-ignored': '旧轮次确认被拒',
     'stale-timeout-ignored': '旧轮次定时器被拒',
     'stale-substitute-ignored': '旧轮次替岗被拒',
@@ -99,7 +102,7 @@ const CueClient = (() => {
         .join(' ');
       const cls = ['cue-timeout', 'confirm-duplicate', 'confirm-late',
         'stale-confirm-ignored', 'stale-timeout-ignored', 'stale-substitute-ignored',
-        'cue-recalled'].includes(e.event)
+        'cue-recalled', 'cue-paused', 'paused-confirm-rejected'].includes(e.event)
         ? 'log-warn' : '';
       return `<div class="log-row ${cls}"><span class="log-ts">${fmtTime(e.ts)}</span>` +
         `<span class="log-event">${label}</span><span class="log-detail">${escapeHtml(detail)}</span></div>`;

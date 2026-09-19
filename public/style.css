@@ -172,6 +172,13 @@ tr.current-row td { background: #24304a; }
   margin-top: 4px;
 }
 
+/* 暂停状态 */
+.pause-info {
+  color: #f0c169;
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+
 /* 只读历史轮次 */
 .attempt-row {
   background: #14161c;

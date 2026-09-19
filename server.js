@@ -31,6 +31,13 @@ const state = {
   substitutions: {}, // 当前轮次的临时替岗：原岗位 -> { substitute, at }，仅对本轮次生效
   cueStartedAt: null,
   deadline: null,
+  // 暂停状态（仅当前轮次）：暂停时冻结剩余确认时长并撤销本轮计时器，恢复时按冻结余量重新计时
+  paused: false,
+  pauseReason: null, // 暂停原因（必填）
+  pausedAt: null, // 暂停时刻（ms 时间戳）
+  pausedBy: null, // 操作者 clientId
+  remainingMs: null, // 冻结的剩余确认时长（ms），恢复时以此重排 deadline，重复暂停/恢复不累计误差
+  timerToken: 0, // 定时器凭证：每次撤销/重排计时器时递增，旧回调凭 token 不匹配被拒绝
   log: [], // [{ ts, event, detail }]
 };
 
@@ -112,6 +119,12 @@ function publicState() {
     effectiveTargets: effectiveTargets(cue),
     cueStartedAt: state.cueStartedAt,
     deadline: state.deadline,
+    // 暂停状态随全量快照下发：断线重连后各端恢复一致的暂停现场
+    paused: state.paused,
+    pauseReason: state.pauseReason,
+    pausedAt: state.pausedAt,
+    pausedBy: state.pausedBy,
+    remainingMs: state.remainingMs,
     serverNow: Date.now(),
     onlinePositions: [...onlinePositions],
     log: state.log.slice(-200),
@@ -157,36 +170,21 @@ function clearCueTimer() {
     clearTimeout(timeoutTimer);
     timeoutTimer = null;
   }
+  // 使任何已排队/迟到的旧回调失效：旧定时器回调只能被拒绝，绝不写入超时状态
+  state.timerToken += 1;
 }
 
-// 开启一轮全新确认时限（首次激活或撤回后修订重发均经此入口）。
-// attemptId 为本轮唯一凭证；确认/超时/替岗/截止时间只属于本轮，绝不带入新轮次。
-// cancelOldTimer=false（撤回场景）时不清除旧轮次定时器：让其到期后凭 attemptId 被拒绝并记录，
-// 即“迟到的旧定时器回调只能被拒绝、绝不污染新轮次”；正常推进/重置仍直接取消旧定时器。
-function startRound(cue, revision, startLog, { cancelOldTimer = true } = {}) {
-  if (cancelOldTimer) clearCueTimer();
-  // 确保该口令存在修订档案（第 1 版开始时建立；attempts 仅在封存时追加）
-  if (!state.cueHistory[cue.id]) {
-    state.cueHistory[cue.id] = { revision: 1, currentReason: null, attempts: [] };
-  }
-  state.attemptId = crypto.randomUUID();
-  state.phase = 'active';
-  // 关键：每轮的确认/超时/替岗状态独立，绝不串入下一轮/下一条（下一条仍用导演编排的原目标）
-  state.confirmations = {};
-  state.timedOut = [];
-  state.substitutions = {};
-  state.cueStartedAt = Date.now();
-  state.deadline = state.cueStartedAt + state.timeoutSec * 1000;
-
+// 为当前轮次布置确认超时定时器（首次激活、撤回重发、暂停后恢复均经此入口）。
+// 回调携带本轮 attemptId 与 timerToken 双重凭证：任一不匹配即为旧回调，只记录、拒绝。
+function armCueTimer(cue, revision, delayMs) {
   const attemptId = state.attemptId;
-  if (startLog) {
-    addLog(startLog.event, { ...startLog.detail, revision, attemptId });
-  }
-
+  const token = ++state.timerToken;
   timeoutTimer = setTimeout(() => {
+    timeoutTimer = null;
     const cueNow = currentCue();
-    // 旧轮次定时器回调：轮次已撤回/口令已推进，只记录、拒绝，绝不污染新轮次
-    if (!cueNow || cueNow.id !== cue.id || state.attemptId !== attemptId) {
+    // 旧定时器回调：轮次已撤回/推进/暂停/恢复重排，只记录、拒绝，绝不写入超时状态
+    if (token !== state.timerToken || !cueNow || cueNow.id !== cue.id ||
+        state.attemptId !== attemptId || state.paused) {
       addLog('stale-timeout-ignored', {
         seq: cue.seq,
         staleRevision: revision,
@@ -198,10 +196,43 @@ function startRound(cue, revision, startLog, { cancelOldTimer = true } = {}) {
     }
     const missing = effectiveTargets(cueNow).filter((t) => !state.confirmations[t]);
     if (missing.length === 0) return;
+    // 本轮已标记过超时（如暂停前已超时，恢复后定时器再次到期）：不重复标记、不重复记录
+    if (state.timedOut.length > 0) return;
     state.timedOut = missing;
     addLog('cue-timeout', { seq: cueNow.seq, revision, attemptId, missing });
     broadcastState();
-  }, state.timeoutSec * 1000);
+  }, delayMs);
+}
+
+// 开启一轮全新确认时限（首次激活或撤回后修订重发均经此入口）。
+// attemptId 为本轮唯一凭证；确认/超时/替岗/暂停/截止时间只属于本轮，绝不带入新轮次。
+// cancelOldTimer=false（撤回场景）时不清除旧轮次定时器：让其到期后凭 attemptId/token 被拒绝并记录，
+// 即“迟到的旧定时器回调只能被拒绝、绝不污染新轮次”；正常推进/重置仍直接取消旧定时器。
+function startRound(cue, revision, startLog, { cancelOldTimer = true } = {}) {
+  if (cancelOldTimer) clearCueTimer();
+  // 确保该口令存在修订档案（第 1 版开始时建立；attempts 仅在封存时追加）
+  if (!state.cueHistory[cue.id]) {
+    state.cueHistory[cue.id] = { revision: 1, currentReason: null, attempts: [] };
+  }
+  state.attemptId = crypto.randomUUID();
+  state.phase = 'active';
+  // 关键：每轮的确认/超时/替岗/暂停状态独立，绝不串入下一轮/下一条（下一条仍用导演编排的原目标）
+  state.confirmations = {};
+  state.timedOut = [];
+  state.substitutions = {};
+  state.paused = false;
+  state.pauseReason = null;
+  state.pausedAt = null;
+  state.pausedBy = null;
+  state.remainingMs = null;
+  state.cueStartedAt = Date.now();
+  state.deadline = state.cueStartedAt + state.timeoutSec * 1000;
+
+  if (startLog) {
+    addLog(startLog.event, { ...startLog.detail, revision, attemptId: state.attemptId });
+  }
+
+  armCueTimer(cue, revision, state.timeoutSec * 1000);
 }
 
 function activateCue(index) {
@@ -247,6 +278,56 @@ function recallCue(ws, reason, newText) {
   broadcastState();
 }
 
+// 暂停当前口令：冻结剩余确认时长、撤销本轮计时器；此后确认/替岗/撤回/推进均被拒绝，直至恢复
+function pauseCue(ws, reason) {
+  const meta = ws.meta || {};
+  const cue = currentCue();
+  const hist = cueHistoryOf(cue);
+  const revision = hist ? hist.revision : 1;
+  // 冻结剩余确认时长（已超时则余量为 0），撤销本轮计时器并使旧回调失效
+  const remainingMs = Math.max(0, state.deadline - Date.now());
+  clearCueTimer();
+  state.paused = true;
+  state.pauseReason = reason;
+  state.pausedAt = Date.now();
+  state.pausedBy = meta.clientId || null;
+  state.remainingMs = remainingMs;
+  addLog('cue-paused', {
+    seq: cue.seq,
+    revision,
+    attemptId: state.attemptId,
+    operator: state.pausedBy,
+    reason,
+    remainingSec: Math.ceil(remainingMs / 1000),
+  });
+  broadcastState();
+}
+
+// 恢复当前口令：沿用同一 attemptId，按冻结余量重新计时（不生成新轮次、不累计误差）
+function resumeCue(ws) {
+  const meta = ws.meta || {};
+  const cue = currentCue();
+  const hist = cueHistoryOf(cue);
+  const revision = hist ? hist.revision : 1;
+  const remainingMs = state.remainingMs;
+  state.paused = false;
+  state.pauseReason = null;
+  state.pausedAt = null;
+  state.pausedBy = null;
+  state.remainingMs = null;
+  // 按冻结余量重排截止时间：deadline = 恢复时刻 + 冻结余量，重复暂停/恢复不累计误差
+  state.deadline = Date.now() + remainingMs;
+  addLog('cue-resumed', {
+    seq: cue.seq,
+    revision,
+    attemptId: state.attemptId,
+    operator: meta.clientId || null,
+    remainingSec: Math.ceil(remainingMs / 1000),
+  });
+  armCueTimer(cue, revision, remainingMs);
+  broadcastState();
+}
+
 function finishSequence() {
   clearCueTimer();
   state.phase = 'done';
@@ -255,6 +336,11 @@ function finishSequence() {
   state.confirmations = {};
   state.timedOut = [];
   state.substitutions = {};
+  state.paused = false;
+  state.pauseReason = null;
+  state.pausedAt = null;
+  state.pausedBy = null;
+  state.remainingMs = null;
   state.cueStartedAt = null;
   state.deadline = null;
   addLog('sequence-finished', {});
@@ -344,6 +430,7 @@ function handleMessage(ws, msg) {
 
     case 'advance': {
       if (state.phase !== 'active') return sendError(ws, '当前没有进行中的口令');
+      if (state.paused) return sendError(ws, '口令已暂停，请先恢复再推进');
       if (!allConfirmed()) {
         const cue = currentCue();
         const missing = effectiveTargets(cue).filter((t) => !state.confirmations[t]);
@@ -373,6 +460,11 @@ function handleMessage(ws, msg) {
       state.confirmations = {};
       state.timedOut = [];
       state.substitutions = {};
+      state.paused = false;
+      state.pauseReason = null;
+      state.pausedAt = null;
+      state.pausedBy = null;
+      state.remainingMs = null;
       state.cueStartedAt = null;
       state.deadline = null;
       addLog('session-reset', {});
@@ -387,6 +479,12 @@ function handleMessage(ws, msg) {
       }
       const cue = currentCue();
       if (!cue) return sendError(ws, '当前没有进行中的口令');
+      // 暂停期间冻结一切岗位操作：确认被拒绝并记录
+      if (state.paused) {
+        addLog('paused-confirm-rejected', { seq: cue.seq, position: meta.position, attemptId: state.attemptId });
+        broadcastState();
+        return sendError(ws, `口令已暂停（${state.pauseReason}），等待控制端恢复后再确认`);
+      }
       const hist = cueHistoryOf(cue);
       const revision = hist ? hist.revision : 1;
       // 旧轮次确认（迟到到达）：attemptId 与当前轮次不符，只拒绝并记录，绝不污染新轮次
@@ -438,6 +536,8 @@ function handleMessage(ws, msg) {
       }
       const cue = currentCue();
       if (!cue) return sendError(ws, '当前没有进行中的口令');
+      // 暂停期间冻结一切岗位操作：替岗被拒绝
+      if (state.paused) return sendError(ws, `口令已暂停（${state.pauseReason}），请先恢复再替岗`);
       // 旧轮次的替岗请求（撤回后迟到到达）：拒绝并记录
       if (data.attemptId && data.attemptId !== state.attemptId) {
         addLog('stale-substitute-ignored', {
@@ -489,6 +589,9 @@ function handleMessage(ws, msg) {
       if (state.phase !== 'active' || !currentCue()) {
         return sendError(ws, '仅可撤回当前进行中的口令；已推进或已完成的口令不可撤回');
       }
+      if (state.paused) {
+        return sendError(ws, `口令已暂停（${state.pauseReason}），请先恢复再撤回`);
+      }
       if (allConfirmed()) {
         return sendError(ws, '当前口令已全员确认完成，不可撤回；如需更正请在下一条口令中说明');
       }
@@ -497,6 +600,43 @@ function handleMessage(ws, msg) {
       if (!reason) return sendError(ws, '请填写撤回原因');
       if (!newText) return sendError(ws, '请填写修正版口令文本');
       recallCue(ws, reason, newText);
+      break;
+    }
+
+    case 'pause': {
+      // 暂停当前口令：仅控制端可发起，仅限进行中且尚未全员确认的口令，必须填写原因
+      const meta = ws.meta || {};
+      if (meta.role !== 'control') {
+        return sendError(ws, '仅控制端可以暂停口令');
+      }
+      if (state.phase !== 'active' || !currentCue()) {
+        return sendError(ws, '当前没有进行中的口令，无法暂停');
+      }
+      if (state.paused) {
+        return sendError(ws, '当前口令已处于暂停状态，请先恢复');
+      }
+      if (allConfirmed()) {
+        return sendError(ws, '当前口令已全员确认完成，不可暂停');
+      }
+      const reason = String(data.reason || '').trim();
+      if (!reason) return sendError(ws, '请填写暂停原因');
+      pauseCue(ws, reason);
+      break;
+    }
+
+    case 'resume': {
+      // 恢复当前口令：仅控制端可发起，沿用同一 attemptId 按冻结余量重新计时
+      const meta = ws.meta || {};
+      if (meta.role !== 'control') {
+        return sendError(ws, '仅控制端可以恢复口令');
+      }
+      if (state.phase !== 'active' || !currentCue()) {
+        return sendError(ws, '当前没有进行中的口令，无法恢复');
+      }
+      if (!state.paused) {
+        return sendError(ws, '当前口令未处于暂停状态');
+      }
+      resumeCue(ws);
       break;
     }
 

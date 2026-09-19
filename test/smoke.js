@@ -289,6 +289,111 @@ const confirmCue = (c) => c.send({ type: 'confirm', attemptId: c.state.attemptId
   await sleep(200);
   check('done 后撤回被拒绝', control.errors.some((e) => e.includes('已推进或已完成')));
 
+  console.log('24. 重置并创建暂停测试序列');
+  control.send({ type: 'reset' });
+  await control.waitState((s) => s.phase === 'idle');
+  director.send({ type: 'setSequence', timeoutSec: 3, cues: [
+    { text: '暂停测试口令', targets: ['灯光', '音响'] },
+  ]});
+  await control.waitState((s) => s.sequence.length === 1);
+  control.send({ type: 'start' });
+  st = await control.waitState((s) => s.phase === 'active');
+  const pauseAttemptId = st.attemptId;
+  check('新轮次未处于暂停状态', st.paused === false && st.remainingMs === null);
+
+  console.log('25. 暂停权限与参数校验');
+  light2.send({ type: 'pause', reason: 'x' }); // 岗位端无权暂停
+  control.send({ type: 'resume' }); // 未暂停时恢复
+  control.send({ type: 'pause', reason: '  ' }); // 缺暂停原因
+  await sleep(300);
+  check('非控制端暂停被拒绝', light2.errors.some((e) => e.includes('仅控制端')));
+  check('未暂停时恢复被拒绝', control.errors.some((e) => e.includes('未处于暂停状态')));
+  check('缺暂停原因被拒绝', control.errors.some((e) => e.includes('暂停原因')));
+  check('校验失败后仍未暂停', control.state.paused === false);
+
+  console.log('26. 暂停成功：冻结剩余时长并撤销计时器');
+  control.send({ type: 'pause', reason: '设备调试' });
+  st = await control.waitState((s) => s.paused === true);
+  check('暂停状态已生效', st.paused === true);
+  check('暂停原因已下发', st.pauseReason === '设备调试');
+  check('剩余确认时长已冻结', typeof st.remainingMs === 'number' && st.remainingMs > 0 && st.remainingMs <= 3000);
+  check('暂停不改变 attemptId', st.attemptId === pauseAttemptId);
+  const frozenRemaining = st.remainingMs;
+  const pauseLog = st.log.find((l) => l.event === 'cue-paused');
+  check('暂停日志记录操作者/原因/时间',
+    !!pauseLog && pauseLog.detail.operator === 'test-control-' &&
+    pauseLog.detail.reason === '设备调试' && !!pauseLog.ts);
+
+  console.log('27. 暂停期间确认/替岗/撤回/推进均被拒绝');
+  confirmCue(light2);
+  control.send({ type: 'substitute', from: '音响', to: '道具', attemptId: pauseAttemptId });
+  control.send({ type: 'recall', reason: 'x', text: 'y' });
+  control.send({ type: 'advance' });
+  control.send({ type: 'pause', reason: '重复暂停' });
+  await sleep(300);
+  check('暂停期间确认被拒绝', light2.errors.some((e) => e.includes('已暂停')));
+  check('暂停期间替岗被拒绝', control.errors.some((e) => e.includes('已暂停') && e.includes('替岗')));
+  check('暂停期间撤回被拒绝', control.errors.some((e) => e.includes('已暂停') && e.includes('撤回')));
+  check('暂停期间推进被拒绝', control.errors.some((e) => e.includes('已暂停') && e.includes('推进')));
+  check('重复暂停被拒绝', control.errors.some((e) => e.includes('已处于暂停状态')));
+  st = control.state;
+  check('暂停期间确认表未被写入', Object.keys(st.confirmations).length === 0);
+  check('暂停中确认被拒已记录日志',
+    st.log.some((l) => l.event === 'paused-confirm-rejected' && l.detail.position === '灯光'));
+
+  console.log('28. 暂停期间计时冻结：超过原时限也不超时');
+  await sleep(3500); // 原 3 秒确认时限已过，若计时器未撤销早已超时
+  st = control.state;
+  check('原时限已过仍未标记超时', st.timedOut.length === 0);
+  check('无当前轮次超时日志', !st.log.some((l) => l.event === 'cue-timeout' && l.detail.attemptId === pauseAttemptId));
+  check('冻结余量未随时间流逝', st.remainingMs === frozenRemaining);
+
+  console.log('29. 断线重连后暂停状态一致');
+  const propViewer = client('position', '道具');
+  await propViewer.ready;
+  st = await propViewer.waitState((s) => s.paused === true);
+  check('重连快照含暂停状态与原因', st.paused === true && st.pauseReason === '设备调试');
+  check('重连快照冻结余量一致', st.remainingMs === frozenRemaining);
+  check('重连快照 attemptId 一致', st.attemptId === pauseAttemptId);
+
+  console.log('30. 恢复：沿用同一 attemptId 按冻结余量重新计时');
+  control.send({ type: 'resume' });
+  st = await control.waitState((s) => s.paused === false);
+  check('恢复后暂停状态清除', st.paused === false && st.pauseReason === null && st.remainingMs === null);
+  check('恢复沿用同一 attemptId', st.attemptId === pauseAttemptId);
+  check('按冻结余量重排 deadline', Math.abs((st.deadline - st.serverNow) - frozenRemaining) < 1000);
+  const resumeLog = st.log.find((l) => l.event === 'cue-resumed');
+  check('恢复日志记录操作者与时间',
+    !!resumeLog && resumeLog.detail.operator === 'test-control-' && !!resumeLog.ts);
+
+  console.log('31. 恢复后确认可用，重复暂停/恢复不累计误差');
+  confirmCue(light2);
+  st = await control.waitState((s) => s.confirmations['灯光']);
+  check('恢复后岗位确认被接受', !!st.confirmations['灯光']);
+  control.send({ type: 'pause', reason: '二次暂停' });
+  st = await control.waitState((s) => s.paused === true);
+  const frozen2 = st.remainingMs;
+  check('二次暂停冻结余量小于首次（时间正常流逝）', frozen2 < frozenRemaining);
+  await sleep(1200);
+  control.send({ type: 'resume' });
+  st = await control.waitState((s) => s.paused === false);
+  check('二次恢复后余量即冻结值，不累计误差', Math.abs((st.deadline - st.serverNow) - frozen2) < 1000);
+
+  console.log('32. 恢复后按冻结余量超时');
+  st = await control.waitState((s) => s.timedOut.includes('音响'), 5000);
+  check('未确认岗位（音响）按余量超时', st.timedOut.includes('音响'));
+  check('已确认岗位（灯光）不在超时列表', !st.timedOut.includes('灯光'));
+  check('超时日志归属当前轮次',
+    st.log.some((l) => l.event === 'cue-timeout' && l.detail.attemptId === pauseAttemptId));
+
+  console.log('33. 重置清理暂停状态');
+  control.send({ type: 'pause', reason: '超时后暂停' }); // 已超时但未全员确认，仍可暂停
+  st = await control.waitState((s) => s.paused === true);
+  check('已超时轮次暂停时余量冻结为 0', st.remainingMs === 0);
+  control.send({ type: 'reset' });
+  st = await control.waitState((s) => s.phase === 'idle');
+  check('重置后暂停状态清空', st.paused === false && st.pauseReason === null && st.remainingMs === null);
+
   console.log(`\n结果：${passed} 通过，${failed} 失败`);
   process.exit(failed ? 1 : 0);
 })().catch((e) => { console.error('测试异常：', e.message); process.exit(1); });
